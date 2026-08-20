@@ -2,8 +2,6 @@ FROM docker.io/library/golang:1.26-bookworm AS builder
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential git && rm -rf /var/lib/apt/lists/*
-
 COPY go.mod go.sum ./
 
 RUN go mod download
@@ -20,9 +18,8 @@ RUN test -n "${BUILD_GIT_SHA}" \
 
 FROM docker.io/library/debian:bookworm
 
-RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certificates && rm -rf /var/lib/apt/lists/*
-
-RUN mkdir /CLIProxyAPI
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 
 COPY --from=builder ./app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
 
@@ -33,7 +30,5 @@ WORKDIR /CLIProxyAPI
 EXPOSE 8317
 
 ENV TZ=Asia/Shanghai
-
-RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
 
 CMD ["./CLIProxyAPI"]
