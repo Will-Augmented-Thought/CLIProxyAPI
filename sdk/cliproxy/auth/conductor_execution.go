@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
@@ -50,6 +53,11 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
+	cfg := m.runtimeConfigSnapshot()
+	quotaRoute := codexSparkQuotaRoute{
+		enabled:   cfg != nil && cfg.QuotaExceeded.CodexSparkQuotaRoute,
+		providers: normalized,
+	}
 	for attempt := 0; ; attempt++ {
 		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
@@ -57,6 +65,18 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		}
 		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
 			return cliproxyexecutor.Response{}, unwrapRequestStopError(errExec)
+		}
+		if miniReq, miniOpts, ok := quotaRoute.Next(errExec, req, opts); ok {
+			logEntryWithRequestID(ctx).WithFields(log.Fields{
+				"requested_model": req.Model,
+				"executed_model":  miniReq.Model,
+			}).Warn("codex Spark quota exhausted; executing Mini capacity route")
+			miniResp, errMini := m.executeMixedOnce(ctx, normalized, miniReq, miniOpts, maxRetryCredentials)
+			if errMini != nil {
+				return cliproxyexecutor.Response{}, unwrapRequestStopError(errMini)
+			}
+			miniResp.Headers = quotaRoute.ExecutedModelHeaders(miniResp.Headers)
+			return miniResp, nil
 		}
 		lastErr = errExec
 		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, retryModel, maxWait)
@@ -138,6 +158,11 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
+	cfg := m.runtimeConfigSnapshot()
+	quotaRoute := codexSparkQuotaRoute{
+		enabled:   cfg != nil && !m.HomeEnabled() && cfg.QuotaExceeded.CodexSparkQuotaRoute,
+		providers: normalized,
+	}
 	for attempt := 0; ; attempt++ {
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errStream == nil {
@@ -145,6 +170,18 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 		if isRequestTerminatedError(errStream) || isRequestStopError(errStream) {
 			return nil, unwrapRequestStopError(errStream)
+		}
+		if miniReq, miniOpts, ok := quotaRoute.Next(errStream, req, opts); ok {
+			logEntryWithRequestID(ctx).WithFields(log.Fields{
+				"requested_model": req.Model,
+				"executed_model":  miniReq.Model,
+			}).Warn("codex Spark quota exhausted before stream output; executing Mini capacity route")
+			miniResult, errMini := m.executeStreamMixedOnce(ctx, normalized, miniReq, miniOpts, maxRetryCredentials)
+			if errMini != nil {
+				return nil, unwrapRequestStopError(errMini)
+			}
+			miniResult.Headers = quotaRoute.ExecutedModelHeaders(miniResult.Headers)
+			return miniResult, nil
 		}
 		lastErr = errStream
 		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, retryModel, maxWait)
@@ -281,6 +318,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
+	isCodexSparkPool := len(providers) == 1 && providers[0] == "codex" && strings.TrimSpace(thinking.ParseSuffix(routeModel).ModelName) == codexSparkModel
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	homeMode := m.HomeEnabled()
@@ -288,6 +326,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
 	var lastErr error
+	quotaOnly := true
+	hasFailure := false
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
@@ -302,6 +342,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
+				if !homeMode && isCodexSparkPool && hasFailure && quotaOnly {
+					return cliproxyexecutor.Response{}, &codexSparkQuotaExhaustionError{cause: lastErr}
+				}
 				return cliproxyexecutor.Response{}, lastErr
 			}
 			return cliproxyexecutor.Response{}, errPick
@@ -327,6 +370,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
+			hasFailure = true
+			quotaOnly = false
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errPrepare); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
@@ -353,20 +398,28 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if !restoreExecutionModel {
 				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel)
 			}
+			startExec := time.Now()
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
+			durationExec := time.Since(startExec)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(execCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
+					quotaOnly = false
 					auth = refreshed
 					didRefreshOnUnauthorized = true
+					startRetry := time.Now()
 					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
+					durationRetry := time.Since(startRetry)
 					if errExec != nil {
+						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationRetry, errExec)
 						if errCtx := execCtx.Err(); errCtx != nil {
 							return cliproxyexecutor.Response{}, errCtx
 						}
 					}
+				} else {
+					warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationExec, errExec)
 				}
 			}
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
@@ -382,6 +435,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					result.CredentialScope = true
 				}
 				action, okAction := matchRequestScopedErrorAction(auth, errExec, m.runtimeConfigSnapshot())
+				hasFailure = true
+				if statusCodeFromError(errExec) != http.StatusTooManyRequests || okAction {
+					quotaOnly = false
+				}
 				applyRequestScopedActionToResult(action, okAction, &result)
 				if isResponsesCompactAvailabilityNeutralError(execOpts, errExec, result.Error) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
@@ -513,7 +570,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if !restoreExecutionModel {
 				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel)
 			}
+			startExec := time.Now()
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
+			durationExec := time.Since(startExec)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
@@ -521,12 +580,17 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(execCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
 					auth = refreshed
 					didRefreshOnUnauthorized = true
+					startRetry := time.Now()
 					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
+					durationRetry := time.Since(startRetry)
 					if errExec != nil {
+						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationRetry, errExec)
 						if errCtx := execCtx.Err(); errCtx != nil {
 							return cliproxyexecutor.Response{}, errCtx
 						}
 					}
+				} else {
+					warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationExec, errExec)
 				}
 			}
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
@@ -605,6 +669,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
+	isCodexSparkPool := len(providers) == 1 && providers[0] == "codex" && strings.TrimSpace(thinking.ParseSuffix(routeModel).ModelName) == codexSparkModel
 	responseAlias := requestedModelAliasFromOptions(opts, routeModel)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
@@ -614,6 +679,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	attempted := make(map[string]struct{})
 	unauthorizedRefreshTried := make(map[string]struct{})
 	var lastErr error
+	quotaOnly := true
+	hasFailure := false
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
@@ -643,6 +710,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
+				if !homeMode && isCodexSparkPool && hasFailure && quotaOnly {
+					return nil, &codexSparkQuotaExhaustionError{cause: lastErr}
+				}
 				return nil, lastErr
 			}
 			return nil, errPick
@@ -711,6 +781,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		}
 		if errPrepare != nil {
+			hasFailure = true
+			quotaOnly = false
 			if selection == nil {
 				if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errPrepare); errCancel != nil {
 					return nil, errCancel
@@ -756,6 +828,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errCtx
 			}
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
+			_, refreshedAfterUnauthorized := unauthorizedRefreshTried[auth.ID]
+			hasFailure = true
+			if refreshedAfterUnauthorized || statusCodeFromError(errStream) != http.StatusTooManyRequests || okAction {
+				quotaOnly = false
+			}
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
 					return nil, wrapRequestStopError(errStream)
@@ -1280,6 +1357,68 @@ func formatOauthIdentity(auth *Auth, provider string, accountInfo string) string
 		return accountInfo
 	}
 	return strings.Join(parts, " ")
+}
+
+func formatAuthIdentity(auth *Auth, provider string) string {
+	if auth == nil {
+		return "auth=nil"
+	}
+	accountType, accountInfo := auth.AccountInfo()
+	switch accountType {
+	case "api_key":
+		return fmt.Sprintf("api_key=%s", util.HideAPIKey(accountInfo))
+	case "oauth":
+		return formatOauthIdentity(auth, provider, accountInfo)
+	default:
+		if auth.FileName != "" {
+			return fmt.Sprintf("auth_file=%s", filepath.Base(auth.FileName))
+		}
+		if auth.ID != "" {
+			return fmt.Sprintf("auth_id=%s", auth.ID)
+		}
+		if accountInfo != "" {
+			return accountInfo
+		}
+		return "unknown"
+	}
+}
+
+func summarizeErrorForLog(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.TrimSpace(err.Error())
+	const maxRunes = 300
+	runes := []rune(msg)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes]) + "..."
+	}
+	return msg
+}
+
+func warnLogUpstreamFailure(ctx context.Context, entry *log.Entry, provider, model string, auth *Auth, duration time.Duration, err error) {
+	if err == nil {
+		return
+	}
+	if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
+		return
+	}
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	if isRequestInvalidError(err) {
+		return
+	}
+	if entry == nil {
+		if ctx != nil {
+			entry = logEntryWithRequestID(ctx)
+		} else {
+			entry = log.NewEntry(log.StandardLogger())
+		}
+	}
+	authIdent := formatAuthIdentity(auth, provider)
+	errSummary := summarizeErrorForLog(err)
+	entry.Warnf("upstream execution failed: provider=%s model=%s auth=%s duration=%s err=%s", provider, model, authIdent, duration.Round(time.Millisecond), errSummary)
 }
 
 // InjectCredentials delegates per-provider HTTP request preparation when supported.
