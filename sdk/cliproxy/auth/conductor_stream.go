@@ -257,6 +257,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, durationStream, errStream)
 				} else if okRefresh {
 					auth = refreshed
+					if unauthorizedRefreshTried != nil {
+						unauthorizedRefreshTried[auth.ID] = struct{}{}
+					}
 					m.replaceHomeExecutionLifecycleAuth(execOpts.ExecutionLifecycle, auth)
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
@@ -336,6 +339,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				} else if okRefresh {
 					discardStreamChunks(streamResult.Chunks)
 					auth = refreshed
+					if unauthorizedRefreshTried != nil {
+						unauthorizedRefreshTried[auth.ID] = struct{}{}
+					}
 					m.replaceHomeExecutionLifecycleAuth(execOpts.ExecutionLifecycle, auth)
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true

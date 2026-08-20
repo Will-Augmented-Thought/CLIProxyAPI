@@ -220,8 +220,10 @@ type QuotaExceeded struct {
 	// SwitchProject indicates whether to automatically switch to another project when a quota is exceeded.
 	SwitchProject bool `yaml:"switch-project" json:"switch-project"`
 
-	// SwitchPreviewModel indicates whether to automatically switch to a preview model when a quota is exceeded.
-	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
+	// CodexSparkQuotaRoute enables the Codex Spark quota route. After all eligible
+	// gpt-5.3-codex-spark credentials return HTTP 429, execution continues once
+	// with gpt-5.4-mini. Other providers, models, and failure classes are terminal.
+	CodexSparkQuotaRoute bool `yaml:"switch-preview-model" json:"switch-preview-model"`
 
 	// AntigravityCredits enables credits-based last-resort fallback for Claude models.
 	// When all free-tier auths are exhausted (429/503), the conductor retries with
