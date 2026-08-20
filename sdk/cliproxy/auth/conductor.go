@@ -2339,10 +2339,27 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	quotaRoute := codexSparkQuotaRoute{
+		enabled:   cfg != nil && cfg.QuotaExceeded.CodexSparkQuotaRoute,
+		providers: normalized,
+	}
 	for attempt := 0; ; attempt++ {
 		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
 			return resp, nil
+		}
+		if miniReq, miniOpts, ok := quotaRoute.Next(errExec, req, opts); ok {
+			logEntryWithRequestID(ctx).WithFields(log.Fields{
+				"requested_model": req.Model,
+				"executed_model":  miniReq.Model,
+			}).Warn("codex Spark quota exhausted; executing Mini capacity route")
+			miniResp, errMini := m.executeMixedOnce(ctx, normalized, miniReq, miniOpts, maxRetryCredentials)
+			if errMini != nil {
+				return cliproxyexecutor.Response{}, errMini
+			}
+			miniResp.Headers = quotaRoute.ExecutedModelHeaders(miniResp.Headers)
+			return miniResp, nil
 		}
 		lastErr = errExec
 		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, retryModel, maxWait)
@@ -2409,10 +2426,27 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	quotaRoute := codexSparkQuotaRoute{
+		enabled:   cfg != nil && cfg.QuotaExceeded.CodexSparkQuotaRoute,
+		providers: normalized,
+	}
 	for attempt := 0; ; attempt++ {
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errStream == nil {
 			return result, nil
+		}
+		if miniReq, miniOpts, ok := quotaRoute.Next(errStream, req, opts); ok {
+			logEntryWithRequestID(ctx).WithFields(log.Fields{
+				"requested_model": req.Model,
+				"executed_model":  miniReq.Model,
+			}).Warn("codex Spark quota exhausted before stream output; executing Mini capacity route")
+			miniResult, errMini := m.executeStreamMixedOnce(ctx, normalized, miniReq, miniOpts, maxRetryCredentials)
+			if errMini != nil {
+				return nil, errMini
+			}
+			miniResult.Headers = quotaRoute.ExecutedModelHeaders(miniResult.Headers)
+			return miniResult, nil
 		}
 		lastErr = errStream
 		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, retryModel, maxWait)
@@ -2536,6 +2570,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
+	isCodexSparkPool := len(providers) == 1 && providers[0] == "codex" && strings.TrimSpace(thinking.ParseSuffix(routeModel).ModelName) == codexSparkModel
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	homeMode := m.HomeEnabled()
@@ -2543,6 +2578,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
 	var lastErr error
+	quotaOnly := true
+	hasFailure := false
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
@@ -2557,6 +2594,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
+				if isCodexSparkPool && hasFailure && quotaOnly {
+					return cliproxyexecutor.Response{}, &codexSparkQuotaExhaustionError{cause: lastErr}
+				}
 				return cliproxyexecutor.Response{}, lastErr
 			}
 			return cliproxyexecutor.Response{}, errPick
@@ -2582,6 +2622,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
+			hasFailure = true
+			if statusCodeFromError(errPrepare) != http.StatusTooManyRequests {
+				quotaOnly = false
+			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare)}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
@@ -2616,6 +2660,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
+				hasFailure = true
+				if statusCodeFromError(errExec) != http.StatusTooManyRequests {
+					quotaOnly = false
+				}
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
@@ -2770,6 +2818,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
+	isCodexSparkPool := len(providers) == 1 && providers[0] == "codex" && strings.TrimSpace(thinking.ParseSuffix(routeModel).ModelName) == codexSparkModel
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	homeMode := m.HomeEnabled()
@@ -2777,6 +2826,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
 	var lastErr error
+	quotaOnly := true
+	hasFailure := false
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
@@ -2791,6 +2842,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
+				if isCodexSparkPool && hasFailure && quotaOnly {
+					return nil, &codexSparkQuotaExhaustionError{cause: lastErr}
+				}
 				return nil, lastErr
 			}
 			return nil, errPick
@@ -2814,6 +2868,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
+			hasFailure = true
+			if statusCodeFromError(errPrepare) != http.StatusTooManyRequests {
+				quotaOnly = false
+			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare)}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
@@ -2826,6 +2884,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, opts, routeModel, streamExecutionModel, models, pooled, aliasResult)
 		if errStream != nil {
+			hasFailure = true
+			if statusCodeFromError(errStream) != http.StatusTooManyRequests {
+				quotaOnly = false
+			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
 			}

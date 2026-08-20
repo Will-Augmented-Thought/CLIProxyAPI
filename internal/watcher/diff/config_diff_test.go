@@ -254,7 +254,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		MaxRetryCredentials:           1,
 		MaxRetryInterval:              1,
 		WebsocketAuth:                 false,
-		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: false, SwitchPreviewModel: false, AntigravityCredits: false},
+		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: false, CodexSparkQuotaRoute: false, AntigravityCredits: false},
 		ClaudeKey:                     []config.ClaudeKey{{APIKey: "c1"}},
 		CodexKey:                      []config.CodexKey{{APIKey: "x1"}},
 		RemoteManagement:              config.RemoteManagement{DisableControlPanel: false, PanelGitHubRepository: "old/repo", SecretKey: "keep"},
@@ -279,7 +279,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		MaxRetryCredentials:           3,
 		MaxRetryInterval:              3,
 		WebsocketAuth:                 true,
-		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true, AntigravityCredits: true},
+		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: true, CodexSparkQuotaRoute: true, AntigravityCredits: true},
 		ClaudeKey: []config.ClaudeKey{
 			{APIKey: "c1", BaseURL: "http://new", ProxyURL: "http://p", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"a"}},
 			{APIKey: "c2"},
@@ -346,7 +346,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		MaxRetryCredentials:           1,
 		MaxRetryInterval:              1,
 		WebsocketAuth:                 false,
-		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: false, SwitchPreviewModel: false, AntigravityCredits: false},
+		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: false, CodexSparkQuotaRoute: false, AntigravityCredits: false},
 		GeminiKey: []config.GeminiKey{
 			{APIKey: "g-old", BaseURL: "http://g-old", ProxyURL: "http://gp-old", Headers: map[string]string{"A": "1"}},
 		},
@@ -395,7 +395,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		MaxRetryCredentials:           3,
 		MaxRetryInterval:              3,
 		WebsocketAuth:                 true,
-		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true, AntigravityCredits: true},
+		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: true, CodexSparkQuotaRoute: true, AntigravityCredits: true},
 		GeminiKey: []config.GeminiKey{
 			{APIKey: "g-new", BaseURL: "http://g-new", ProxyURL: "http://gp-new", Headers: map[string]string{"A": "2"}, ExcludedModels: []string{"x", "y"}},
 		},
