@@ -1,4 +1,4 @@
-FROM golang:1.26-bookworm AS builder
+FROM docker.io/library/golang:1.26-bookworm AS builder
 
 WORKDIR /app
 
@@ -11,12 +11,14 @@ RUN go mod download
 COPY . .
 
 ARG VERSION=dev
-ARG COMMIT=none
-ARG BUILD_DATE=unknown
+ARG BUILD_GIT_SHA
+ARG BUILD_TIMESTAMP
 
-RUN CGO_ENABLED=1 GOOS=linux go build -buildvcs=false -ldflags="-s -w -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" -o ./CLIProxyAPI ./cmd/server/
+RUN test -n "${BUILD_GIT_SHA}" \
+    && test -n "${BUILD_TIMESTAMP}" \
+    && CGO_ENABLED=1 GOOS=linux go build -buildvcs=false -ldflags="-s -w -X 'main.Version=${VERSION}' -X 'main.Commit=${BUILD_GIT_SHA}' -X 'main.BuildDate=${BUILD_TIMESTAMP}'" -o ./CLIProxyAPI ./cmd/server/
 
-FROM debian:bookworm
+FROM docker.io/library/debian:bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certificates && rm -rf /var/lib/apt/lists/*
 
