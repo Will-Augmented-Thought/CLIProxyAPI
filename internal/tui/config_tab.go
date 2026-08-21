@@ -344,7 +344,7 @@ func (m configTabModel) parseConfig(cfg map[string]any) []configField {
 
 	// Quota exceeded
 	fields = append(fields, configField{"Switch Project on Quota", "quota-exceeded/switch-project", "bool", fmt.Sprintf("%v", getBoolNested(cfg, "quota-exceeded", "switch-project")), nil})
-	fields = append(fields, configField{"Spark Quota Route to Mini", "quota-exceeded/switch-preview-model", "bool", fmt.Sprintf("%v", getBoolNested(cfg, "quota-exceeded", "switch-preview-model")), nil})
+	fields = append(fields, configField{"Switch Preview Model", "quota-exceeded/switch-preview-model", "bool", fmt.Sprintf("%v", getBoolNested(cfg, "quota-exceeded", "switch-preview-model")), nil})
 
 	// Routing
 	if routing, ok := cfg["routing"].(map[string]any); ok {
