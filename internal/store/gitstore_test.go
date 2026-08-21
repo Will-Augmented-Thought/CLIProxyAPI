@@ -1272,11 +1272,12 @@ func TestGitTokenStoreMissingPackfileRecoveryFailsClosedWithoutBaseline(t *testi
 		t.Fatalf("Save: %v", errSave)
 	}
 
-	repo := corruptGitRepository(t, filepath.Join(root, "workspace"))
+	workspaceDir := filepath.Join(root, "workspace")
+	corruptGitRepository(t, workspaceDir)
 	if errRemove := os.Remove(authPath); errRemove != nil {
 		t.Fatalf("remove local auth before recovery: %v", errRemove)
 	}
-	if errVerify := verifyRepositoryHead(repo); !isRepositoryCorruptionError(errVerify) {
+	if errVerify := verifyRepositoryHead(workspaceDir); !isRepositoryCorruptionError(errVerify) {
 		t.Fatalf("verifyRepositoryHead error = %v, want repository corruption", errVerify)
 	}
 
@@ -1439,12 +1440,12 @@ func removeHeadFileObject(t *testing.T, repoDir, path string) {
 	if errRemove := os.Remove(objectPath); errRemove != nil {
 		t.Fatalf("remove repository object for %s: %v", path, errRemove)
 	}
-	if errVerify := verifyRepositoryHead(repo); !isRepositoryCorruptionError(errVerify) {
+	if errVerify := verifyRepositoryHead(repoDir); !isRepositoryCorruptionError(errVerify) {
 		t.Fatalf("verifyRepositoryHead error = %v, want repository corruption", errVerify)
 	}
 }
 
-func corruptGitRepository(t *testing.T, repoDir string) *git.Repository {
+func corruptGitRepository(t *testing.T, repoDir string) {
 	t.Helper()
 
 	repo, errOpen := git.PlainOpen(repoDir)
@@ -1478,7 +1479,6 @@ func corruptGitRepository(t *testing.T, repoDir string) *git.Repository {
 			t.Fatalf("remove packfile %s: %v", filepath.Base(packfile), errRemove)
 		}
 	}
-	return repo
 }
 
 func setupGitRemoteRepository(t *testing.T, root, defaultBranch string, branches ...testBranchSpec) string {

@@ -212,7 +212,7 @@ func (s *GitTokenStore) ensureRepositoryLocked() error {
 			s.dirLock.Unlock()
 			return fmt.Errorf("git token store: worktree: %w", errWorktree)
 		}
-		if errVerify := verifyRepositoryHead(repo); errVerify != nil {
+		if errVerify := verifyRepositoryHead(repoDir); errVerify != nil {
 			if !isRepositoryCorruptionError(errVerify) {
 				s.dirLock.Unlock()
 				return fmt.Errorf("git token store: verify repository before pull: %w", errVerify)
@@ -325,7 +325,7 @@ func (s *GitTokenStore) ensureRepositoryLocked() error {
 			}
 		}
 		if !repositoryRecovered {
-			if errVerify := verifyRepositoryHead(repo); errVerify != nil {
+			if errVerify := verifyRepositoryHead(repoDir); errVerify != nil {
 				if !isRepositoryCorruptionError(errVerify) {
 					s.dirLock.Unlock()
 					return fmt.Errorf("git token store: verify repository after pull: %w", errVerify)
@@ -1139,7 +1139,7 @@ func (s *GitTokenStore) recoverRepositoryLocked(repoDir string, authMethod []cli
 	if errClone != nil {
 		return fmt.Errorf("clone remote repository: %w", errClone)
 	}
-	if errVerify := verifyRepositoryHead(clonedRepo); errVerify != nil {
+	if errVerify := verifyRepositoryHead(cloneDir); errVerify != nil {
 		return fmt.Errorf("verify cloned repository: %w", errVerify)
 	}
 	clonedHead, errHead := clonedRepo.Head()
@@ -1188,10 +1188,7 @@ func (s *GitTokenStore) recoverRepositoryLocked(repoDir string, authMethod []cli
 		}
 		return errMoveWorktree
 	}
-	recoveredRepo, errOpen := git.PlainOpen(repoDir)
-	if errOpen == nil {
-		errOpen = verifyRepositoryHead(recoveredRepo)
-	}
+	errOpen := verifyRepositoryHead(repoDir)
 	if errOpen != nil {
 		errRecovered := fmt.Errorf("verify recovered repository: %w", errOpen)
 		if errRollback := rollbackRecoveredRepository(repoDir, gitDir, backupGitDir, backupWorktreeDir); errRollback != nil {
@@ -1385,9 +1382,10 @@ func isRepositoryCorruptionError(err error) bool {
 	return errors.Is(err, dotgit.ErrPackfileNotFound) || errors.Is(err, plumbing.ErrObjectNotFound)
 }
 
-func verifyRepositoryHead(repo *git.Repository) error {
-	if repo == nil {
-		return fmt.Errorf("repository is nil")
+func verifyRepositoryHead(repoDir string) error {
+	repo, errOpen := git.PlainOpen(repoDir)
+	if errOpen != nil {
+		return errOpen
 	}
 	head, errHead := repo.Head()
 	if errHead != nil {
