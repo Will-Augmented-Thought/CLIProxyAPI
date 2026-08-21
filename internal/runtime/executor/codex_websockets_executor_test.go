@@ -221,7 +221,7 @@ func TestCodexWebsocketsExecuteResponsesLiteDoesNotInjectImageGenerationTool(t *
 	}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.6-sol",
-		Payload: []byte(`{"model":"gpt-5.6-sol","input":[{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"exec"}]},{"role":"user","content":"hello"}],"parallel_tool_calls":true,"client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"true"}}`),
+		Payload: []byte(`{"model":"gpt-5.6-sol","conversation":{"id":"conv_will"},"metadata":{"tenant":"will"},"input":[{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"exec"}]},{"role":"user","content":"hello"}],"parallel_tool_calls":true,"client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"true"}}`),
 	}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
 
@@ -231,6 +231,12 @@ func TestCodexWebsocketsExecuteResponsesLiteDoesNotInjectImageGenerationTool(t *
 
 	select {
 	case payload := <-capturedPayload:
+		if gjson.GetBytes(payload, "metadata").Exists() {
+			t.Fatalf("unsupported metadata reached Codex websocket provider: %s", payload)
+		}
+		if gjson.GetBytes(payload, "conversation").Exists() {
+			t.Fatalf("unsupported conversation reached Codex websocket provider: %s", payload)
+		}
 		if tools := gjson.GetBytes(payload, "tools"); tools.Exists() {
 			t.Fatalf("unexpected tools in responses-lite upstream payload: %s", tools.Raw)
 		}
@@ -285,7 +291,7 @@ func TestCodexWebsocketsExecuteStreamResponsesLiteForcesParallelToolCallsFalse(t
 	}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.6-luna",
-		Payload: []byte(`{"model":"gpt-5.6-luna","input":[{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"exec"}]},{"role":"user","content":"hello"}],"parallel_tool_calls":true,"client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"true"}}`),
+		Payload: []byte(`{"model":"gpt-5.6-luna","conversation":{"id":"conv_will"},"metadata":{"tenant":"will"},"input":[{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"exec"}]},{"role":"user","content":"hello"}],"parallel_tool_calls":true,"client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"true"}}`),
 	}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
 
@@ -311,6 +317,12 @@ func TestCodexWebsocketsExecuteStreamResponsesLiteForcesParallelToolCallsFalse(t
 
 	select {
 	case payload := <-capturedPayload:
+		if gjson.GetBytes(payload, "metadata").Exists() {
+			t.Fatalf("unsupported metadata reached Codex websocket stream provider: %s", payload)
+		}
+		if gjson.GetBytes(payload, "conversation").Exists() {
+			t.Fatalf("unsupported conversation reached Codex websocket stream provider: %s", payload)
+		}
 		parallelToolCalls := gjson.GetBytes(payload, "parallel_tool_calls")
 		if !parallelToolCalls.Exists() || parallelToolCalls.Bool() {
 			t.Fatalf("responses-lite parallel_tool_calls should be false: %s", payload)
