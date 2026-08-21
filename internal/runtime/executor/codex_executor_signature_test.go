@@ -48,7 +48,7 @@ func TestCodexExecutorDropsInvalidReasoningEncryptedContentFromFinalRequest(t *t
 	executor := NewCodexExecutor(&config.Config{})
 	_, err := executor.Execute(context.Background(), newCodexSignatureTestAuth(server.URL), cliproxyexecutor.Request{
 		Model: "gpt-5.4",
-		Payload: []byte(`{"model":"gpt-5.4","input":[` +
+		Payload: []byte(`{"model":"gpt-5.4","metadata":{"tenant":"will"},"input":[` +
 			`{"id":"rs_bad","type":"reasoning","encrypted_content":"gAAAAABqFTIa\u2026abc","summary":[]},` +
 			`{"id":"rs_non_string","type":"reasoning","encrypted_content":123,"summary":[]},` +
 			`{"id":"rs_good","type":"reasoning","encrypted_content":"` + validEncryptedContent + `","summary":[]},` +
@@ -80,6 +80,9 @@ func TestCodexExecutorDropsInvalidReasoningEncryptedContentFromFinalRequest(t *t
 	if got := gjson.GetBytes(gotBody, "input.3.encrypted_content").String(); got != "leave-message-alone" {
 		t.Fatalf("non-reasoning encrypted_content = %q, want untouched", got)
 	}
+	if gjson.GetBytes(gotBody, "metadata").Exists() {
+		t.Fatalf("unsupported metadata reached Codex provider; body=%s", string(gotBody))
+	}
 }
 
 func TestCodexExecutorExecuteStreamDropsInvalidReasoningEncryptedContentFromFinalRequest(t *testing.T) {
@@ -98,7 +101,7 @@ func TestCodexExecutorExecuteStreamDropsInvalidReasoningEncryptedContentFromFina
 	executor := NewCodexExecutor(&config.Config{})
 	result, err := executor.ExecuteStream(context.Background(), newCodexSignatureTestAuth(server.URL), cliproxyexecutor.Request{
 		Model:   "gpt-5.4",
-		Payload: []byte(`{"model":"gpt-5.4","stream":true,"input":[{"id":"rs_bad","type":"reasoning","encrypted_content":"bad","summary":[]}]}`),
+		Payload: []byte(`{"model":"gpt-5.4","stream":true,"metadata":{"tenant":"will"},"input":[{"id":"rs_bad","type":"reasoning","encrypted_content":"bad","summary":[]}]}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FromString("openai-response"),
 		Stream:       true,
@@ -110,6 +113,9 @@ func TestCodexExecutorExecuteStreamDropsInvalidReasoningEncryptedContentFromFina
 	}
 	if gjson.GetBytes(gotBody, "input.0.encrypted_content").Exists() {
 		t.Fatalf("invalid stream reasoning encrypted_content exists, want removed; body=%s", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "metadata").Exists() {
+		t.Fatalf("unsupported metadata reached Codex stream provider; body=%s", string(gotBody))
 	}
 }
 
@@ -129,7 +135,7 @@ func TestCodexExecutorCompactDropsInvalidReasoningEncryptedContentFromFinalReque
 	executor := NewCodexExecutor(&config.Config{})
 	_, err := executor.Execute(context.Background(), newCodexSignatureTestAuth(server.URL), cliproxyexecutor.Request{
 		Model:   "gpt-5.4",
-		Payload: []byte(`{"model":"gpt-5.4","input":[{"id":"rs_bad","type":"reasoning","encrypted_content":"bad","summary":[]}]}`),
+		Payload: []byte(`{"model":"gpt-5.4","metadata":{"tenant":"will"},"input":[{"id":"rs_bad","type":"reasoning","encrypted_content":"bad","summary":[]}]}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FromString("openai-response"),
 		Alt:          "responses/compact",
@@ -140,5 +146,8 @@ func TestCodexExecutorCompactDropsInvalidReasoningEncryptedContentFromFinalReque
 	}
 	if gjson.GetBytes(gotBody, "input.0.encrypted_content").Exists() {
 		t.Fatalf("invalid compact reasoning encrypted_content exists, want removed; body=%s", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "metadata").Exists() {
+		t.Fatalf("unsupported metadata reached Codex compact provider; body=%s", string(gotBody))
 	}
 }
