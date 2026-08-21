@@ -16,11 +16,11 @@ func (h *Handler) PutSwitchProject(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.QuotaExceeded.SwitchProject = v })
 }
 
-func (h *Handler) GetCodexSparkQuotaRoute(c *gin.Context) {
-	c.JSON(200, gin.H{"switch-preview-model": h.cfg.QuotaExceeded.CodexSparkQuotaRoute})
+func (h *Handler) GetSwitchPreviewModel(c *gin.Context) {
+	c.JSON(200, gin.H{"switch-preview-model": h.cfg.QuotaExceeded.SwitchPreviewModel})
 }
-func (h *Handler) PutCodexSparkQuotaRoute(c *gin.Context) {
-	h.updateBoolField(c, func(v bool) { h.cfg.QuotaExceeded.CodexSparkQuotaRoute = v })
+func (h *Handler) PutSwitchPreviewModel(c *gin.Context) {
+	h.updateBoolField(c, func(v bool) { h.cfg.QuotaExceeded.SwitchPreviewModel = v })
 }
 
 // ResetQuota clears quota/cooldown routing state for one auth index.
