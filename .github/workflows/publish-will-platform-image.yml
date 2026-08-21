@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   dispatch:
-    runs-on: org-self-hosted
+    runs-on: cli-proxy-api-control
     timeout-minutes: 5
     steps:
       - name: Require repository-writer credentials
