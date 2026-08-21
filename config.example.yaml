@@ -198,7 +198,9 @@ video-result-auth-cache-ttl: "3h"
 # Quota exceeded behavior
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
-  switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
+  # After all eligible gpt-5.3-codex-spark credentials return HTTP 429,
+  # continue once with gpt-5.4-mini. Other failures do not switch models.
+  switch-preview-model: true
   antigravity-credits: true # Whether to use credits as last-resort fallback when all free-tier auths are exhausted for Claude models
 
 # Routing strategy for selecting credentials when multiple match.
