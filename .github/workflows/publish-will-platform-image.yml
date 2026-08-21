@@ -1,0 +1,58 @@
+name: Publish Will platform image
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: publish-will-platform-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: org-self-hosted
+    timeout-minutes: 5
+    steps:
+      - name: Require repository-writer credentials
+        env:
+          WILL_APP_CLIENT_ID: ${{ secrets.WILL_READ_APP_ID }}
+          WILL_APP_PRIVATE_KEY: ${{ secrets.WILL_READ_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${WILL_APP_CLIENT_ID:-}" || -z "${WILL_APP_PRIVATE_KEY:-}" ]]; then
+            echo "WILL_READ_APP_ID and WILL_READ_APP_PRIVATE_KEY are required for platform publication." >&2
+            exit 1
+          fi
+
+      - name: Mint private release-owner token
+        id: release_owner_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.WILL_READ_APP_ID }}
+          private-key: ${{ secrets.WILL_READ_APP_PRIVATE_KEY }}
+          owner: Will-Augmented-Thought
+          repositories: will-devops
+          permission-actions: write
+
+      - name: Dispatch immutable release
+        env:
+          GH_TOKEN: ${{ steps.release_owner_token.outputs.token }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "main did not resolve to a full lowercase commit SHA: ${SOURCE_SHA}" >&2
+            exit 1
+          fi
+          payload="$(jq -cn --arg source_sha "${SOURCE_SHA}" '{ref:"main",inputs:{source_sha:$source_sha}}')"
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --data "${payload}" \
+            'https://api.github.com/repos/Will-Augmented-Thought/will-devops/actions/workflows/publish-cli-proxy-api.yml/dispatches'
