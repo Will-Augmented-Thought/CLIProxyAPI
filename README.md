@@ -142,6 +142,19 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
+## Codex Spark Quota Route
+
+`quota-exceeded.switch-preview-model` enables one explicit Codex capacity
+transition. After every eligible `gpt-5.3-codex-spark` credential returns HTTP
+429, the conductor executes the request once with `gpt-5.4-mini`. Other models,
+providers, and failure classes do not use this route, and a Mini failure is
+terminal.
+
+Credential retry caps cannot claim full Spark exhaustion. Streaming requests
+may change models only before the first payload. Usage keeps the original
+requested-model attribution, while a successful transition returns
+`OpenAI-Model: gpt-5.4-mini` so clients can record the model that executed.
+
 ## Usage Statistics
 
 Since v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. If you need usage statistics, use:

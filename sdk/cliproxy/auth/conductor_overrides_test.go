@@ -184,6 +184,126 @@ type authFallbackExecutor struct {
 	countTokenErrors  map[string]error
 }
 
+type codexSparkQuotaCall struct {
+	mode               string
+	authID             string
+	model              string
+	requestedModel     string
+	authSelectionModel string
+}
+
+type codexSparkQuotaExecutor struct {
+	id string
+
+	mu                       sync.Mutex
+	calls                    []codexSparkQuotaCall
+	executeErrors            map[string]error
+	executeByAuth            map[string]map[string]error
+	streamErrors             map[string]error
+	streamLate               map[string]error
+	countErrors              map[string]error
+	executeErrorAfterRefresh error
+	streamErrorAfterRefresh  error
+}
+
+func (e *codexSparkQuotaExecutor) Identifier() string {
+	return e.id
+}
+
+func (e *codexSparkQuotaExecutor) Execute(_ context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.mu.Lock()
+	e.calls = append(e.calls, codexSparkQuotaCall{
+		mode:               "execute",
+		authID:             auth.ID,
+		model:              req.Model,
+		requestedModel:     stringMetadataValue(opts.Metadata, cliproxyexecutor.RequestedModelMetadataKey),
+		authSelectionModel: stringMetadataValue(opts.Metadata, cliproxyexecutor.AuthSelectionModelMetadataKey),
+	})
+	errExecute := e.executeErrors[req.Model]
+	if authErrors := e.executeByAuth[auth.ID]; authErrors != nil {
+		if authError, ok := authErrors[req.Model]; ok {
+			errExecute = authError
+		}
+	}
+	e.mu.Unlock()
+	if errExecute != nil {
+		return cliproxyexecutor.Response{}, errExecute
+	}
+	return cliproxyexecutor.Response{
+		Payload: []byte(req.Model),
+		Headers: http.Header{"X-Upstream-Model": {req.Model}},
+	}, nil
+}
+
+func (e *codexSparkQuotaExecutor) ExecuteStream(_ context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.calls = append(e.calls, codexSparkQuotaCall{
+		mode:               "stream",
+		authID:             auth.ID,
+		model:              req.Model,
+		requestedModel:     stringMetadataValue(opts.Metadata, cliproxyexecutor.RequestedModelMetadataKey),
+		authSelectionModel: stringMetadataValue(opts.Metadata, cliproxyexecutor.AuthSelectionModelMetadataKey),
+	})
+	errStream := e.streamErrors[req.Model]
+	e.mu.Unlock()
+
+	chunks := make(chan cliproxyexecutor.StreamChunk, 2)
+	if errStream != nil {
+		chunks <- cliproxyexecutor.StreamChunk{Err: errStream}
+	} else {
+		chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(req.Model)}
+		if errLate := e.streamLate[req.Model]; errLate != nil {
+			chunks <- cliproxyexecutor.StreamChunk{Err: errLate}
+		}
+	}
+	close(chunks)
+	return &cliproxyexecutor.StreamResult{
+		Headers: http.Header{"X-Upstream-Model": {req.Model}},
+		Chunks:  chunks,
+	}, nil
+}
+
+func (e *codexSparkQuotaExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.executeErrorAfterRefresh != nil {
+		e.executeErrors[codexSparkModel] = e.executeErrorAfterRefresh
+	}
+	if e.streamErrorAfterRefresh != nil {
+		e.streamErrors[codexSparkModel] = e.streamErrorAfterRefresh
+	}
+	return auth, nil
+}
+
+func (e *codexSparkQuotaExecutor) CountTokens(_ context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.mu.Lock()
+	e.calls = append(e.calls, codexSparkQuotaCall{
+		mode:               "count",
+		authID:             auth.ID,
+		model:              req.Model,
+		requestedModel:     stringMetadataValue(opts.Metadata, cliproxyexecutor.RequestedModelMetadataKey),
+		authSelectionModel: stringMetadataValue(opts.Metadata, cliproxyexecutor.AuthSelectionModelMetadataKey),
+	})
+	errCount := e.countErrors[req.Model]
+	e.mu.Unlock()
+	if errCount != nil {
+		return cliproxyexecutor.Response{}, errCount
+	}
+	return cliproxyexecutor.Response{Payload: []byte(req.Model)}, nil
+}
+
+func (e *codexSparkQuotaExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *codexSparkQuotaExecutor) Calls() []codexSparkQuotaCall {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	calls := make([]codexSparkQuotaCall, len(e.calls))
+	copy(calls, e.calls)
+	return calls
+}
+
 func (e *authFallbackExecutor) Identifier() string {
 	return e.id
 }
@@ -407,6 +527,334 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestManager_CodexSparkQuotaRoute(t *testing.T) {
+	newManager := func(t *testing.T, provider string, executor *codexSparkQuotaExecutor, authCount int, enabled bool) *Manager {
+		t.Helper()
+		manager := NewManager(nil, nil, nil)
+		manager.SetConfig(&internalconfig.Config{
+			QuotaExceeded: internalconfig.QuotaExceeded{CodexSparkQuotaRoute: enabled},
+		})
+		manager.SetRetryConfig(0, 0, 0)
+		manager.RegisterExecutor(executor)
+
+		models := []*registry.ModelInfo{
+			{ID: codexSparkModel},
+			{ID: codexSparkExhaustedModel},
+			{ID: "gpt-5.4"},
+		}
+		reg := registry.GetGlobalRegistry()
+		for i := 0; i < authCount; i++ {
+			auth := &Auth{ID: uuid.NewString(), Provider: provider}
+			reg.RegisterClient(auth.ID, provider, models)
+			t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+		}
+		return manager
+	}
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.RequestedModelMetadataKey:     "cli-proxy-openai/fast",
+		cliproxyexecutor.AuthSelectionModelMetadataKey: codexSparkModel,
+	}}
+
+	t.Run("non-streaming exhausts Spark credentials before Mini", func(t *testing.T) {
+		executor := &codexSparkQuotaExecutor{
+			id: "codex",
+			executeErrors: map[string]error{
+				codexSparkModel: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "Spark quota exhausted"},
+			},
+		}
+		manager := newManager(t, "codex", executor, 2, true)
+
+		resp, errExecute := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: codexSparkModel}, opts)
+		if errExecute != nil {
+			t.Fatalf("execute: %v", errExecute)
+		}
+		if string(resp.Payload) != codexSparkExhaustedModel {
+			t.Fatalf("payload model = %q, want %q", string(resp.Payload), codexSparkExhaustedModel)
+		}
+		if model := resp.Headers.Get("OpenAI-Model"); model != codexSparkExhaustedModel {
+			t.Fatalf("OpenAI-Model = %q, want %q", model, codexSparkExhaustedModel)
+		}
+
+		calls := executor.Calls()
+		if len(calls) != 3 {
+			t.Fatalf("calls = %d, want 3", len(calls))
+		}
+		if calls[0].model != codexSparkModel || calls[1].model != codexSparkModel || calls[0].authID == calls[1].authID {
+			t.Fatalf("Spark calls = %#v, want two distinct credentials", calls[:2])
+		}
+		miniCall := calls[2]
+		if miniCall.model != codexSparkExhaustedModel || miniCall.requestedModel != "cli-proxy-openai/fast" || miniCall.authSelectionModel != "" {
+			t.Fatalf("Mini call = %#v, want preserved requested model and no auth-selection override", miniCall)
+		}
+	})
+
+	t.Run("streaming switches only on bootstrap failure", func(t *testing.T) {
+		executor := &codexSparkQuotaExecutor{
+			id: "codex",
+			streamErrors: map[string]error{
+				codexSparkModel: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "Spark quota exhausted"},
+			},
+		}
+		manager := newManager(t, "codex", executor, 2, true)
+
+		result, errExecute := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: codexSparkModel}, opts)
+		if errExecute != nil {
+			t.Fatalf("execute stream: %v", errExecute)
+		}
+		if model := result.Headers.Get("OpenAI-Model"); model != codexSparkExhaustedModel {
+			t.Fatalf("OpenAI-Model = %q, want %q", model, codexSparkExhaustedModel)
+		}
+		chunk := <-result.Chunks
+		if chunk.Err != nil || string(chunk.Payload) != codexSparkExhaustedModel {
+			t.Fatalf("Mini stream chunk = %#v, want model payload", chunk)
+		}
+
+		calls := executor.Calls()
+		if len(calls) != 3 || calls[0].model != codexSparkModel || calls[1].model != codexSparkModel || calls[2].model != codexSparkExhaustedModel {
+			t.Fatalf("stream calls = %#v, want Spark, Spark, Mini", calls)
+		}
+		if calls[2].requestedModel != "cli-proxy-openai/fast" || calls[2].authSelectionModel != "" {
+			t.Fatalf("Mini stream metadata = %#v, want preserved requested model and no auth-selection override", calls[2])
+		}
+	})
+
+	t.Run("streaming never switches after output begins", func(t *testing.T) {
+		executor := &codexSparkQuotaExecutor{
+			id: "codex",
+			streamLate: map[string]error{
+				codexSparkModel: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "late Spark quota error"},
+			},
+		}
+		manager := newManager(t, "codex", executor, 1, true)
+
+		result, errExecute := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: codexSparkModel}, opts)
+		if errExecute != nil {
+			t.Fatalf("execute stream: %v", errExecute)
+		}
+		if model := result.Headers.Get("OpenAI-Model"); model != "" {
+			t.Fatalf("OpenAI-Model = %q, want no capacity transition header", model)
+		}
+		first := <-result.Chunks
+		if first.Err != nil || string(first.Payload) != codexSparkModel {
+			t.Fatalf("first chunk = %#v, want Spark output", first)
+		}
+		second := <-result.Chunks
+		if status := statusCodeFromError(second.Err); status != http.StatusTooManyRequests {
+			t.Fatalf("late stream status = %d, want %d", status, http.StatusTooManyRequests)
+		}
+		calls := executor.Calls()
+		if len(calls) != 1 || calls[0].model != codexSparkModel {
+			t.Fatalf("calls = %#v, want one Spark stream and no Mini", calls)
+		}
+	})
+
+	t.Run("Mini failure is terminal", func(t *testing.T) {
+		for _, stream := range []bool{false, true} {
+			executor := &codexSparkQuotaExecutor{
+				id: "codex",
+				executeErrors: map[string]error{
+					codexSparkModel:          &Error{HTTPStatus: http.StatusTooManyRequests, Message: "Spark quota exhausted"},
+					codexSparkExhaustedModel: &Error{HTTPStatus: http.StatusInternalServerError, Message: "Mini failed"},
+				},
+				streamErrors: map[string]error{
+					codexSparkModel:          &Error{HTTPStatus: http.StatusTooManyRequests, Message: "Spark quota exhausted"},
+					codexSparkExhaustedModel: &Error{HTTPStatus: http.StatusInternalServerError, Message: "Mini failed"},
+				},
+			}
+			manager := newManager(t, "codex", executor, 2, true)
+
+			var errExecute error
+			if stream {
+				_, errExecute = manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: codexSparkModel}, opts)
+			} else {
+				_, errExecute = manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: codexSparkModel}, opts)
+			}
+			if status := statusCodeFromError(errExecute); status != http.StatusInternalServerError {
+				t.Fatalf("stream=%t status = %d, want %d", stream, status, http.StatusInternalServerError)
+			}
+
+			calls := executor.Calls()
+			if len(calls) != 3 {
+				t.Fatalf("stream=%t calls = %d, want two Spark attempts and exactly one Mini attempt", stream, len(calls))
+			}
+			for i, call := range calls {
+				if i < 2 && call.model != codexSparkModel {
+					t.Fatalf("stream=%t call %d model = %q, want Spark", stream, i, call.model)
+				}
+				if i == 2 && call.model != codexSparkExhaustedModel {
+					t.Fatalf("stream=%t call %d model = %q, want one Mini attempt", stream, i, call.model)
+				}
+			}
+		}
+	})
+
+	t.Run("other failures and routes never switch", func(t *testing.T) {
+		testCases := []struct {
+			name     string
+			provider string
+			model    string
+			enabled  bool
+			status   int
+		}{
+			{name: "disabled", provider: "codex", model: codexSparkModel, enabled: false, status: http.StatusTooManyRequests},
+			{name: "other provider", provider: "claude", model: codexSparkModel, enabled: true, status: http.StatusTooManyRequests},
+			{name: "other model", provider: "codex", model: "gpt-5.4", enabled: true, status: http.StatusTooManyRequests},
+			{name: "bad request", provider: "codex", model: codexSparkModel, enabled: true, status: http.StatusBadRequest},
+			{name: "forbidden", provider: "codex", model: codexSparkModel, enabled: true, status: http.StatusForbidden},
+			{name: "timeout", provider: "codex", model: codexSparkModel, enabled: true, status: http.StatusRequestTimeout},
+			{name: "server error", provider: "codex", model: codexSparkModel, enabled: true, status: http.StatusInternalServerError},
+		}
+		for _, testCase := range testCases {
+			t.Run(testCase.name, func(t *testing.T) {
+				executor := &codexSparkQuotaExecutor{
+					id: testCase.provider,
+					executeErrors: map[string]error{
+						testCase.model: &Error{HTTPStatus: testCase.status, Message: testCase.name},
+					},
+				}
+				manager := newManager(t, testCase.provider, executor, 1, testCase.enabled)
+				testOpts := opts
+				testOpts.Metadata = map[string]any{
+					cliproxyexecutor.RequestedModelMetadataKey:     "cli-proxy-openai/fast",
+					cliproxyexecutor.AuthSelectionModelMetadataKey: testCase.model,
+				}
+
+				_, errExecute := manager.Execute(context.Background(), []string{testCase.provider}, cliproxyexecutor.Request{Model: testCase.model}, testOpts)
+				if status := statusCodeFromError(errExecute); status != testCase.status {
+					t.Fatalf("status = %d, want %d", status, testCase.status)
+				}
+				for _, call := range executor.Calls() {
+					if call.model == codexSparkExhaustedModel {
+						t.Fatalf("unexpected Mini call for %s: %#v", testCase.name, call)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("unauthorized refresh followed by quota does not prove exhaustion", func(t *testing.T) {
+		for _, stream := range []bool{false, true} {
+			executor := &codexSparkQuotaExecutor{id: "codex"}
+			if stream {
+				executor.streamErrors = map[string]error{
+					codexSparkModel: &Error{HTTPStatus: http.StatusUnauthorized, Message: "expired Spark credential"},
+				}
+				executor.streamErrorAfterRefresh = &Error{HTTPStatus: http.StatusTooManyRequests, Message: "Spark quota exhausted"}
+			} else {
+				executor.executeErrors = map[string]error{
+					codexSparkModel: &Error{HTTPStatus: http.StatusUnauthorized, Message: "expired Spark credential"},
+				}
+				executor.executeErrorAfterRefresh = &Error{HTTPStatus: http.StatusTooManyRequests, Message: "Spark quota exhausted"}
+			}
+
+			manager := newManager(t, "codex", executor, 2, true)
+			for _, auth := range manager.List() {
+				auth.Metadata = map[string]any{
+					"access_token":  "expired-token",
+					"refresh_token": "refresh-token",
+				}
+				if _, errUpdate := manager.Update(context.Background(), auth); errUpdate != nil {
+					t.Fatalf("update auth: %v", errUpdate)
+				}
+			}
+
+			var errExecute error
+			if stream {
+				result, errStream := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: codexSparkModel}, opts)
+				if errStream != nil {
+					t.Fatalf("execute stream: %v", errStream)
+				}
+				chunk := <-result.Chunks
+				errExecute = chunk.Err
+			} else {
+				_, errExecute = manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: codexSparkModel}, opts)
+			}
+			if status := statusCodeFromError(errExecute); status != http.StatusTooManyRequests {
+				t.Fatalf("stream=%t status = %d, want %d", stream, status, http.StatusTooManyRequests)
+			}
+			for _, call := range executor.Calls() {
+				if call.model == codexSparkExhaustedModel {
+					t.Fatalf("stream=%t unexpected Mini call after unauthorized refresh: %#v", stream, call)
+				}
+			}
+		}
+	})
+
+	t.Run("mixed Spark failures do not prove quota exhaustion", func(t *testing.T) {
+		executor := &codexSparkQuotaExecutor{id: "codex"}
+		manager := newManager(t, "codex", executor, 2, true)
+		auths := manager.List()
+		if len(auths) != 2 {
+			t.Fatalf("auth count = %d, want 2", len(auths))
+		}
+		executor.executeByAuth = map[string]map[string]error{
+			auths[0].ID: {codexSparkModel: &Error{HTTPStatus: http.StatusInternalServerError, Message: "Spark server failure"}},
+			auths[1].ID: {codexSparkModel: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "Spark quota exhausted"}},
+		}
+
+		if _, errExecute := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: codexSparkModel}, opts); errExecute == nil {
+			t.Fatal("expected mixed Spark failure")
+		}
+		calls := executor.Calls()
+		if len(calls) != 2 {
+			t.Fatalf("calls = %d, want both Spark credentials", len(calls))
+		}
+		for _, call := range calls {
+			if call.model != codexSparkModel {
+				t.Fatalf("unexpected Mini call after mixed Spark failures: %#v", call)
+			}
+		}
+	})
+
+	t.Run("credential retry cap cannot claim full exhaustion", func(t *testing.T) {
+		executor := &codexSparkQuotaExecutor{
+			id: "codex",
+			executeErrors: map[string]error{
+				codexSparkModel: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "Spark quota exhausted"},
+			},
+		}
+		manager := newManager(t, "codex", executor, 2, true)
+		manager.SetRetryConfig(0, 0, 1)
+
+		_, errExecute := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: codexSparkModel}, opts)
+		if status := statusCodeFromError(errExecute); status != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want %d", status, http.StatusTooManyRequests)
+		}
+		calls := executor.Calls()
+		if len(calls) != 1 || calls[0].model != codexSparkModel {
+			t.Fatalf("calls = %#v, want one capped Spark attempt and no Mini", calls)
+		}
+	})
+
+	t.Run("token counting never switches models", func(t *testing.T) {
+		executor := &codexSparkQuotaExecutor{
+			id: "codex",
+			countErrors: map[string]error{
+				codexSparkModel: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "Spark quota exhausted"},
+			},
+		}
+		manager := newManager(t, "codex", executor, 2, true)
+
+		_, errCount := manager.ExecuteCount(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: codexSparkModel}, opts)
+		if status := statusCodeFromError(errCount); status != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want %d", status, http.StatusTooManyRequests)
+		}
+		calls := executor.Calls()
+		if len(calls) != 2 {
+			t.Fatalf("count calls = %d, want 2 Spark credentials", len(calls))
+		}
+		for _, call := range calls {
+			if call.mode != "count" || call.model != codexSparkModel {
+				t.Fatalf("count call = %#v, want Spark only", call)
+			}
+		}
+	})
 }
 
 func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
